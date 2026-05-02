@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Rubik's Drop</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #0d0d1a; }
+        #ui {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            color: #ccc;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            background: rgba(0, 0, 0, 0.72);
+            padding: 14px 18px;
+            border-radius: 8px;
+            line-height: 2;
+            border: 1px solid #2a2a4a;
+            pointer-events: none;
+            user-select: none;
+        }
+        #ui h3 { color: #fff; font-size: 13px; letter-spacing: 2px; margin-bottom: 2px; }
+        #ui .row { display: flex; justify-content: space-between; gap: 24px; }
+        #ui .key { color: #778899; }
+        #ui .val { color: #7dd3fc; font-weight: bold; }
+        #ui .hint {
+            color: #556677;
+            font-size: 10px;
+            margin-top: 8px;
+            border-top: 1px solid #222244;
+            padding-top: 8px;
+        }
+    </style>
+</head>
+<body>
+<div id="ui">
+    <h3>RUBIK'S DROP</h3>
+    <div class="row"><span class="key">GRAVITY</span>        <span class="val" id="vG"></span></div>
+    <div class="row"><span class="key">MASS</span>           <span class="val" id="vM"></span></div>
+    <div class="row"><span class="key">RESTITUTION</span>    <span class="val" id="vR"></span></div>
+    <div class="row"><span class="key">FRICTION</span>       <span class="val" id="vF"></span></div>
+    <div class="row"><span class="key">LINEAR_DAMPING</span> <span class="val" id="vLD"></span></div>
+    <div class="row"><span class="key">ANGULAR_DAMPING</span><span class="val" id="vAD"></span></div>
+    <div class="row"><span class="key">DROP_HEIGHT</span>    <span class="val" id="vDH"></span></div>
+    <div class="hint">Click to reset drop · Drag to orbit · Scroll to zoom</div>
+</div>
+
+<!-- Three.js r128 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- OrbitControls for r128 -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<!-- Cannon.js physics -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  PHYSICS CONSTANTS — change these to feel different behaviors
+// ═══════════════════════════════════════════════════════════════
+const GRAVITY         = -18;   // m/s²  Earth = -9.81; crank up for harder, faster drops
+const MASS            =  2.0;  // kg    heavier = more momentum; lighter = floatier bounces
+const RESTITUTION     =  0.55; // 0–1   bounciness: 0 = dead thud, 1 = perfect elastic
+const FRICTION        =  0.40; // 0–1   floor grip:  0 = frictionless ice, 1 = rubber
+const LINEAR_DAMPING  =  0.01; // 0–1   air drag on translation (slows falling/sliding)
+const ANGULAR_DAMPING =  0.15; // 0–1   air drag on spin (damps rotation over time)
+const DROP_HEIGHT     =  9;    // m     height above floor where cube spawns
+const CUBE_SIZE       =  1;    // m     edge length of the whole Rubik's cube
+// ═══════════════════════════════════════════════════════════════
+
+// Populate the HUD
+document.getElementById('vG').textContent  = GRAVITY   + ' m/s²';
+document.getElementById('vM').textContent  = MASS      + ' kg';
+document.getElementById('vR').textContent  = RESTITUTION;
+document.getElementById('vF').textContent  = FRICTION;
+document.getElementById('vLD').textContent = LINEAR_DAMPING;
+document.getElementById('vAD').textContent = ANGULAR_DAMPING;
+document.getElementById('vDH').textContent = DROP_HEIGHT + ' m';
+
+// ── Renderer ────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+// ── Scene ───────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d1a);
+scene.fog = new THREE.FogExp2(0x0d0d1a, 0.035);
+
+// ── Camera & orbit controls ─────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(7, 5, 11);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 2, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 3;
+controls.maxDistance = 40;
+controls.update();
+
+// ── Lighting ────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x334466, 0.9));
+
+const sun = new THREE.DirectionalLight(0xfff5e0, 1.3);
+sun.position.set(8, 20, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near   =  1;
+sun.shadow.camera.far    = 60;
+sun.shadow.camera.left   = sun.shadow.camera.bottom = -14;
+sun.shadow.camera.right  = sun.shadow.camera.top    =  14;
+sun.shadow.bias = -0.001;
+scene.add(sun);
+
+const rimLight = new THREE.DirectionalLight(0x6688ff, 0.5);
+rimLight.position.set(-6, 8, -6);
+scene.add(rimLight);
+
+// ── Floor ───────────────────────────────────────────────────────
+const floorMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(40, 40),
+    new THREE.MeshStandardMaterial({ color: 0x181830, roughness: 0.85, metalness: 0.08 })
+);
+floorMesh.rotation.x = -Math.PI / 2;
+floorMesh.receiveShadow = true;
+scene.add(floorMesh);
+
+// Subtle grid overlay
+const grid = new THREE.GridHelper(40, 40, 0x1e1e40, 0x181838);
+grid.position.y = 0.001;
+scene.add(grid);
+
+// ── Rubik's cube face colors ────────────────────────────────────
+const FC = {
+    px: 0x0046ad, // +X  Blue   (Right)
+    nx: 0x009b48, // -X  Green  (Left)
+    py: 0xffffff, // +Y  White  (Top)
+    ny: 0xffd500, // -Y  Yellow (Bottom)
+    pz: 0xb71234, // +Z  Red    (Front)
+    nz: 0xff5800, // -Z  Orange (Back)
+    inner: 0x111111,
+};
+
+function buildRubiksMesh() {
+    const group = new THREE.Group();
+    const cs   = CUBE_SIZE / 3;     // individual cubie edge length
+    const edge = cs * 0.95;         // slight gap between cubies
+
+    for (let x = -1; x <= 1; x++) {
+        for (let y = -1; y <= 1; y++) {
+            for (let z = -1; z <= 1; z++) {
+                if (x === 0 && y === 0 && z === 0) continue; // hidden center
+
+                // BoxGeometry face order: +X, -X, +Y, -Y, +Z, -Z
+                const mats = [
+                    new THREE.MeshPhongMaterial({ color: x ===  1 ? FC.px : FC.inner, shininess: 90 }),
+                    new THREE.MeshPhongMaterial({ color: x === -1 ? FC.nx : FC.inner, shininess: 90 }),
+                    new THREE.MeshPhongMaterial({ color: y ===  1 ? FC.py : FC.inner, shininess: 90 }),
+                    new THREE.MeshPhongMaterial({ color: y === -1 ? FC.ny : FC.inner, shininess: 90 }),
+                    new THREE.MeshPhongMaterial({ color: z ===  1 ? FC.pz : FC.inner, shininess: 90 }),
+                    new THREE.MeshPhongMaterial({ color: z === -1 ? FC.nz : FC.inner, shininess: 90 }),
+                ];
+
+                const cubie = new THREE.Mesh(new THREE.BoxGeometry(edge, edge, edge), mats);
+                cubie.position.set(x * cs, y * cs, z * cs);
+                cubie.castShadow = true;
+                group.add(cubie);
+            }
+        }
+    }
+    return group;
+}
+
+// ── Cannon.js world ─────────────────────────────────────────────
+const world = new CANNON.World();
+world.gravity.set(0, GRAVITY, 0);
+world.broadphase = new CANNON.NaiveBroadphase();
+world.solver.iterations = 12;
+
+const physCube  = new CANNON.Material('cube');
+const physFloor = new CANNON.Material('floor');
+
+world.addContactMaterial(new CANNON.ContactMaterial(physFloor, physCube, {
+    friction:    FRICTION,
+    restitution: RESTITUTION,
+}));
+
+// Static infinite floor body (plane normal = +Y after rotation)
+const groundBody = new CANNON.Body({ mass: 0, material: physFloor });
+groundBody.addShape(new CANNON.Plane());
+groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+world.addBody(groundBody);
+
+// ── Active cube ──────────────────────────────────────────────────
+let rubiksMesh = null;
+let cubeBody   = null;
+
+function dropCube() {
+    if (rubiksMesh) scene.remove(rubiksMesh);
+    if (cubeBody)   world.remove(cubeBody);
+
+    // Visual group
+    rubiksMesh = buildRubiksMesh();
+    scene.add(rubiksMesh);
+
+    // Physics body — box half-extents match visual size
+    const half = CUBE_SIZE / 2;
+    cubeBody = new CANNON.Body({ mass: MASS, material: physCube });
+    cubeBody.addShape(new CANNON.Box(new CANNON.Vec3(half, half, half)));
+    cubeBody.linearDamping  = LINEAR_DAMPING;
+    cubeBody.angularDamping = ANGULAR_DAMPING;
+
+    // Starting position
+    cubeBody.position.set(0, DROP_HEIGHT, 0);
+
+    // Random initial tilt so it hits the floor at an angle → skewed bounce
+    const axis = new CANNON.Vec3(
+        Math.random() - 0.5,
+        Math.random() - 0.5,
+        Math.random() - 0.5
+    );
+    axis.normalize();
+    cubeBody.quaternion.setFromAxisAngle(axis, (Math.random() - 0.5) * Math.PI * 0.5);
+
+    // Small initial spin while falling
+    cubeBody.angularVelocity.set(
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2
+    );
+
+    world.addBody(cubeBody);
+}
+
+dropCube();
+
+// ── Input ────────────────────────────────────────────────────────
+document.addEventListener('click', (e) => {
+    // Ignore clicks on the HUD
+    if (document.getElementById('ui').contains(e.target)) return;
+    dropCube();
+});
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Animation loop ───────────────────────────────────────────────
+const FIXED_STEP = 1 / 60;
+let lastTime = performance.now() * 0.001;
+
+(function animate() {
+    requestAnimationFrame(animate);
+
+    const now = performance.now() * 0.001;
+    const dt  = Math.min(now - lastTime, 0.05); // cap delta to avoid tunnelling
+    lastTime  = now;
+
+    world.step(FIXED_STEP, dt, 3);
+
+    // Sync Three.js mesh → Cannon.js body
+    if (rubiksMesh && cubeBody) {
+        const p = cubeBody.position;
+        const q = cubeBody.quaternion;
+        rubiksMesh.position.set(p.x, p.y, p.z);
+        rubiksMesh.quaternion.set(q.x, q.y, q.z, q.w);
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+}());
+</script>
+</body>
+</html>
