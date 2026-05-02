@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hari's Cards - Professional Encoder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #064e3b;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at center, #065f46 0%, #043d2e 100%);
+        }
+        canvas {
+            cursor: pointer;
+        }
+        .instruction-box {
+            position: absolute;
+            bottom: 170px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.85);
+            padding: 12px 30px;
+            border-radius: 50px;
+            color: white;
+            text-align: center;
+            max-width: 90%;
+            pointer-events: none;
+            border: 1px solid rgba(255,255,255,0.15);
+            z-index: 100;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            font-size: 1.1rem;
+        }
+        .controls {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            z-index: 200;
+        }
+        .btn {
+            background: #d97706;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: #b45309; }
+        .btn:disabled { background: #4b5563; cursor: not-allowed; }
+
+        #debugPanel {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            color: #10b981;
+            font-family: monospace;
+            padding: 15px;
+            font-size: 12px;
+            border-top: 2px solid #065f46;
+            z-index: 300;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            pointer-events: none;
+        }
+        .debug-item span { color: #9ca3af; margin-right: 8px; }
+        .highlight { color: #f59e0b; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container">
+    <div id="statusLabel" class="instruction-box">Choose any card and don't let the magician see it.</div>
+
+    <div class="controls">
+        <button id="shuffleBtn" class="btn" style="display: none;">Shuffle as much as you wish</button>
+        <button id="resetBtn" class="btn" style="display: none;">Pick a new card</button>
+    </div>
+
+    <button id="debugToggleBtn" style="position: fixed; bottom: 0; left: 0; width: 10px; height: 10px; opacity: 0; cursor: pointer; border: none; background: none; padding: 0; margin: 0;"></button>
+
+    <div id="debugPanel">
+        <div class="debug-item"><span>CHOSEN:</span> <b id="dbgChosen" class="highlight">NONE</b></div>
+        <div class="debug-item"><span>KEY SUIT:</span> <b id="dbgSuit" class="highlight">NONE</b></div>
+        <div class="debug-item"><span>DIRECTION:</span> <b id="dbgDir" class="highlight">NONE</b></div>
+        <div class="debug-item" style="grid-column: span 3;"><span>PATH:</span> <b id="dbgPath">NONE</b></div>
+    </div>
+    <canvas id="cardCanvas"></canvas>
+</div>
+
+<script>
+    const SHOW_DEBUG_PANEL = false;
+    const CARD_PREVIEW_MODE = false;  // true → show all 52 cards face-up in a grid (for tweaking appearance)
+
+    const canvas = document.getElementById('cardCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusLabel = document.getElementById('statusLabel');
+    const shuffleBtn = document.getElementById('shuffleBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const debugPanel = document.getElementById('debugPanel');
+
+    const dbgChosen = document.getElementById('dbgChosen');
+    const dbgSuit = document.getElementById('dbgSuit');
+    const dbgDir = document.getElementById('dbgDir');
+    const dbgPath = document.getElementById('dbgPath');
+
+    const CARD_WIDTH = 132;
+    const CARD_HEIGHT = 184;
+    const CORNER_RADIUS = 10;
+
+    // ── Card face appearance ──────────────────────────────────────────────────
+    const CORNER_RANK_SIZE  = 19;   // px — rank font in top-left / bottom-right corner
+    const CORNER_SUIT_SIZE  = 22;   // px — suit font in corner (below rank)
+    const CORNER_SUIT_GAP   = 17;   // px — vertical gap from rank baseline to suit baseline
+    const PIP_SIZE          = 42;   // px — suit pip font for number cards 2–10
+    const ACE_PIP_SIZE      = 100;   // px — oversized single pip for Ace
+    const FACE_GLYPH_SIZE   = 44;   // px — chess-piece glyph (J/Q/K) in face image area
+    const FACE_RANK_SIZE    = 13;   // px — small rank label inside face image area
+    const FACE_CORNER_SIZE  = 12;   // px — suit pip at four corners of face image area
+    // ─────────────────────────────────────────────────────────────────────────
+
+    let cards = [];
+    let mouseX = -2000, mouseY = -2000;
+    let gameState = 'picking';
+    let chosenCardObject = null;
+    let isShufflingVisual = false;
+
+    const suits = ['♠', '♥', '♣', '♦'];
+    const values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+    const keyRanks = ['2', '3', '4'];
+
+    // Positions 1-5 (indices 0-4) and 48-52 (indices 47-51) are kept clear of key cards
+    // during the face-down phase so the spectator never accidentally picks one,
+    // and so the magician knows any key card there was placed intentionally.
+    const BUFFER_ZONE = [0, 1, 2, 3, 4, 47, 48, 49, 50, 51];
+
+    class Card {
+        constructor(rank, suit) {
+            this.rank = rank;
+            this.suit = suit;
+            this.isFaceUp = false;
+            this.updateColor();
+            this.currentX = canvas.width / 2;
+            this.currentY = canvas.height / 2;
+            this.startX = canvas.width / 2;
+            this.startY = canvas.height / 2;
+            this.rotation = 0;
+            this.scale = 1;
+            this.zIndex = 0;
+            this.jogAmount = 0;
+            this.shuffleX = 0;
+            this.shuffleY = 0;
+            this.isRevealing = false;
+            this.revealStartTime = 0;
+        }
+
+        updateColor() {
+            this.color = (this.suit === '♥' || this.suit === '♦') ? '#d01b1b' : '#111111';
+        }
+
+        getLabel() { return `${this.rank}${this.suit}`; }
+
+        update(index, total, mX, mY) {
+            if (CARD_PREVIEW_MODE) {
+                const COLS = 13, gap = 6;
+                const cellW = CARD_WIDTH + gap, cellH = CARD_HEIGHT + gap;
+                const scale = Math.min(
+                    (canvas.width  * 0.97) / (COLS * cellW),
+                    (canvas.height * 0.97) / (4    * cellH)
+                );
+                const col = index % COLS, row = Math.floor(index / COLS);
+                this.currentX = (canvas.width  - COLS * cellW * scale) / 2 + (col * cellW + CARD_WIDTH  / 2) * scale;
+                this.currentY = (canvas.height - 4    * cellH * scale) / 2 + (row * cellH + CARD_HEIGHT / 2) * scale;
+                this.rotation = 0;
+                this.scale = scale;
+                this.zIndex = index;
+                return;
+            }
+            if (this.isRevealing) { this._updateReveal(); return; }
+            if (isShufflingVisual) {
+                this.currentX += (this.shuffleX - this.currentX) * 0.15;
+                this.currentY += (this.shuffleY - this.currentY) * 0.15;
+                return;
+            }
+            const fanOriginX = canvas.width / 2;
+            const fanOriginY = canvas.height * 1.5;
+            const baseRadius = Math.min(canvas.width, canvas.height) * 1.15;
+            const angleSpan = Math.min(Math.PI * 0.85, (canvas.width / baseRadius) * 0.85);
+            const startAngle = -Math.PI/2 - angleSpan/2;
+            const endAngle = -Math.PI/2 + angleSpan/2;
+            const angle = startAngle + (index / (total - 1)) * (endAngle - startAngle);
+
+            let rOff = (this.jogAmount === 1) ? 100 : 0;
+            const influence = (gameState === 'picking') ? Math.max(0, 1 - this.getDist(mX, mY, angle, baseRadius, fanOriginX, fanOriginY) / 150) : 0;
+
+            const targetX = fanOriginX + Math.cos(angle) * (baseRadius + rOff + (influence * 80));
+            const targetY = fanOriginY + Math.sin(angle) * (baseRadius + rOff + (influence * 80));
+
+            const lerpSpeed = (gameState === 'locked') ? 0.25 : 0.08;
+
+            this.currentX += (targetX - this.currentX) * lerpSpeed;
+            this.currentY += (targetY - this.currentY) * lerpSpeed;
+            this.rotation += ((angle + Math.PI/2) - this.rotation) * lerpSpeed;
+            this.scale += ((1 + (influence * 0.15)) - this.scale) * 0.08;
+
+            this.zIndex = (this.jogAmount === 1) ? 100000 : index + (influence * 1000);
+
+            // Save current position for reveal animation
+            this.startX = this.currentX;
+            this.startY = this.currentY;
+        }
+
+        _updateReveal() {
+            const elapsed = performance.now() - this.revealStartTime;
+            this.zIndex = 200000;
+            const targetX = canvas.width / 2;
+            const targetY = canvas.height / 2;
+
+            if (elapsed < 700) {
+                // Spin up phase: move to center while spinning and scaling to 4x
+                this.currentX += (targetX - this.currentX) * 0.12;
+                this.currentY += (targetY - this.currentY) * 0.12;
+                this.scale += (4 - this.scale) * 0.10;
+                this.rotation += 0.25;
+            } else {
+                // Settled: stay big and centered forever
+                this.currentX = targetX;
+                this.currentY = targetY;
+                this.scale = 4;
+                this.rotation = 0;
+            }
+        }
+
+        getDist(mX, mY, a, r, ox, oy) {
+            return Math.sqrt((mX - (ox + Math.cos(a)*r))**2 + (mY - (oy + Math.sin(a)*r))**2);
+        }
+
+        draw(ctx) {
+            ctx.save();
+            ctx.translate(this.currentX, this.currentY);
+            ctx.rotate(this.rotation);
+            ctx.scale(this.scale, this.scale);
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.roundRect(-CARD_WIDTH/2, -CARD_HEIGHT/2, CARD_WIDTH, CARD_HEIGHT, CORNER_RADIUS);
+            ctx.fill();
+
+            if (this.isFaceUp) {
+                this.drawFace(ctx);
+            } else {
+                this.drawBack(ctx);
+            }
+
+            ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        drawFace(ctx) {
+            const cw = CARD_WIDTH, ch = CARD_HEIGHT;
+            ctx.fillStyle = this.color;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'alphabetic';
+            // Top-left corner index
+            ctx.font = `bold ${CORNER_RANK_SIZE}px serif`;
+            ctx.fillText(this.rank, -cw/2 + 12, -ch/2 + CORNER_RANK_SIZE);
+            ctx.font = `${CORNER_SUIT_SIZE}px serif`;
+            ctx.fillText(this.suit, -cw/2 + 12, -ch/2 + CORNER_RANK_SIZE + CORNER_SUIT_GAP);
+            // Bottom-right corner index (rotated 180°)
+            ctx.save();
+            ctx.rotate(Math.PI);
+            ctx.font = `bold ${CORNER_RANK_SIZE}px serif`;
+            ctx.fillText(this.rank, -cw/2 + 12, -ch/2 + CORNER_RANK_SIZE);
+            ctx.font = `${CORNER_SUIT_SIZE}px serif`;
+            ctx.fillText(this.suit, -cw/2 + 12, -ch/2 + CORNER_RANK_SIZE + CORNER_SUIT_GAP);
+            ctx.restore();
+            if (this.rank === 'J' || this.rank === 'Q' || this.rank === 'K') {
+                this._drawFaceCard(ctx);
+            } else {
+                this._drawPips(ctx);
+            }
+        }
+
+        _drawPips(ctx) {
+            const pips = {
+                'A':  [[0, 0, ACE_PIP_SIZE]],
+                '2':  [[0,-52],[0,52]],
+                '3':  [[0,-52],[0,0],[0,52]],
+                '4':  [[-27,-52],[27,-52],[-27,52],[27,52]],
+                '5':  [[-27,-52],[27,-52],[0,0],[-27,52],[27,52]],
+                '6':  [[-27,-52],[27,-52],[-27,0],[27,0],[-27,52],[27,52]],
+                '7':  [[-27,-52],[27,-52],[0,-25],[-27,0],[27,0],[-27,52],[27,52]],
+                '8':  [[-27,-52],[27,-52],[0,-25],[-27,0],[27,0],[0,25],[-27,52],[27,52]],
+                '9':  [[-27,-52],[27,-52],[-27,-25],[27,-25],[0,0],[-27,25],[27,25],[-27,52],[27,52]],
+                '10': [[-27,-52],[27,-52],[-27,-25],[27,-25],[0,-38],[0,38],[-27,25],[27,25],[-27,52],[27,52]],
+            };
+            const layout = pips[this.rank];
+            if (!layout) return;
+            ctx.fillStyle = this.color;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            for (const [x, y, sz] of layout) {
+                ctx.font = `${sz || PIP_SIZE}px serif`;
+                ctx.fillText(this.suit, x, y);
+            }
+            ctx.textBaseline = 'alphabetic';
+        }
+
+        _drawFaceCard(ctx) {
+            const cw = CARD_WIDTH, ch = CARD_HEIGHT;
+            const isRed = this.color === '#d01b1b';
+            const fw = 88, fh = 112;
+            // Tinted background for face image area
+            ctx.fillStyle = isRed ? '#fff0f0' : '#eff3ff';
+            ctx.beginPath();
+            ctx.roundRect(-fw/2, -fh/2, fw, fh, 4);
+            ctx.fill();
+            // Outer border
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(-fw/2, -fh/2, fw, fh, 4);
+            ctx.stroke();
+            // Inner filigree border
+            ctx.lineWidth = 0.75;
+            ctx.beginPath();
+            ctx.roundRect(-fw/2 + 4, -fh/2 + 4, fw - 8, fh - 8, 2);
+            ctx.stroke();
+            // Chess-piece glyph — double-headed (top half normal, bottom half rotated)
+            const glyph = { K: '♚', Q: '♛', J: '♞' }[this.rank];
+            ctx.fillStyle = this.color;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = `${FACE_GLYPH_SIZE}px serif`;
+            ctx.fillText(glyph, 0, -fh/4 + 2);
+            ctx.font = `bold ${FACE_RANK_SIZE}px serif`;
+            ctx.fillText(this.rank, 0, fh/4 - 18);
+            // Center horizontal divider
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = 0.75;
+            ctx.beginPath();
+            ctx.moveTo(-fw/2 + 10, 0);
+            ctx.lineTo(fw/2 - 10, 0);
+            ctx.stroke();
+            // Bottom half (mirror)
+            ctx.save();
+            ctx.rotate(Math.PI);
+            ctx.font = `${FACE_GLYPH_SIZE}px serif`;
+            ctx.fillText(glyph, 0, -fh/4 + 2);
+            ctx.font = `bold ${FACE_RANK_SIZE}px serif`;
+            ctx.fillText(this.rank, 0, fh/4 - 18);
+            ctx.restore();
+            // Suit pips at four inner corners of face area
+            ctx.font = `${FACE_CORNER_SIZE}px serif`;
+            ctx.fillStyle = this.color;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(this.suit, -fw/2 + 8, -fh/2 + 10);
+            ctx.fillText(this.suit,  fw/2 - 8, -fh/2 + 10);
+            ctx.fillText(this.suit, -fw/2 + 8,  fh/2 - 10);
+            ctx.fillText(this.suit,  fw/2 - 8,  fh/2 - 10);
+            ctx.textBaseline = 'alphabetic';
+            ctx.lineWidth = 1;
+        }
+
+        drawBack(ctx) {
+            const cw = CARD_WIDTH, ch = CARD_HEIGHT;
+            // Deep navy fill
+            ctx.fillStyle = '#1a237e';
+            ctx.beginPath();
+            ctx.roundRect(-cw/2 + 5, -ch/2 + 5, cw - 10, ch - 10, 7);
+            ctx.fill();
+            // White frame
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(-cw/2 + 9, -ch/2 + 9, cw - 18, ch - 18, 5);
+            ctx.stroke();
+            // Clip to inner area and draw crosshatch
+            ctx.save();
+            ctx.beginPath();
+            ctx.roundRect(-cw/2 + 11, -ch/2 + 11, cw - 22, ch - 22, 4);
+            ctx.clip();
+            ctx.strokeStyle = 'rgba(100,140,255,0.45)';
+            ctx.lineWidth = 0.8;
+            for (let d = -(cw + ch); d < (cw + ch); d += 10) {
+                ctx.beginPath();
+                ctx.moveTo(-cw/2 + d, -ch/2);
+                ctx.lineTo(-cw/2 + d + ch, ch/2);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(-cw/2 + d, ch/2);
+                ctx.lineTo(-cw/2 + d + ch, -ch/2);
+                ctx.stroke();
+            }
+            ctx.restore();
+            // Gold inner border
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(-cw/2 + 13, -ch/2 + 13, cw - 26, ch - 26, 3);
+            ctx.stroke();
+            // Centre medallion
+            ctx.fillStyle = '#1a237e';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 20, 26, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 20, 26, 0, 0, Math.PI * 2);
+            ctx.stroke();
+            // Gold star in medallion
+            ctx.fillStyle = '#fbbf24';
+            ctx.font = '20px serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('✦', 0, 0);
+            ctx.textBaseline = 'alphabetic';
+            ctx.lineWidth = 1;
+        }
+
+        contains(mx, my) {
+            const dx = mx - this.currentX, dy = my - this.currentY;
+            const cos = Math.cos(-this.rotation), sin = Math.sin(-this.rotation);
+            const lx = (dx * cos - dy * sin) / (this.scale || 1), ly = (dx * sin + dy * cos) / (this.scale || 1);
+            return (lx >= -CARD_WIDTH/2 && lx <= CARD_WIDTH/2 && ly >= -CARD_HEIGHT/2 && ly <= CARD_HEIGHT/2);
+        }
+    }
+
+    function swapIdentities(idxA, idxB) {
+        if (idxA === idxB || idxA < 0 || idxB < 0 || idxA >= 52 || idxB >= 52) return;
+        const tempR = cards[idxA].rank;
+        const tempS = cards[idxA].suit;
+        cards[idxA].rank = cards[idxB].rank;
+        cards[idxA].suit = cards[idxB].suit;
+        cards[idxB].rank = tempR;
+        cards[idxB].suit = tempS;
+        cards[idxA].updateColor();
+        cards[idxB].updateColor();
+    }
+
+    // Moves any key cards out of BUFFER_ZONE into the safe middle section.
+    // skipIdx is the chosen card's index (never moved).
+    function enforceBufferZone(skipIdx = -1) {
+        for (const bi of BUFFER_ZONE) {
+            if (bi === skipIdx) continue;
+            if (keyRanks.includes(cards[bi].rank)) {
+                const safeIdx = cards.findIndex((c, i) =>
+                    !keyRanks.includes(c.rank) &&
+                    !BUFFER_ZONE.includes(i) &&
+                    i !== skipIdx
+                );
+                if (safeIdx !== -1) swapIdentities(bi, safeIdx);
+            }
+        }
+    }
+
+    function init() {
+        debugPanel.style.display = SHOW_DEBUG_PANEL ? 'grid' : 'none';
+        let deck = [];
+        suits.forEach(s => values.forEach(v => deck.push({ r: v, s: s })));
+
+        for (let i = deck.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [deck[i], deck[j]] = [deck[j], deck[i]];
+        }
+
+        cards = deck.map(d => new Card(d.r, d.s));
+
+        if (CARD_PREVIEW_MODE) {
+            const suitOrder = {'♠':0,'♥':1,'♣':2,'♦':3};
+            const rankOrder = {'A':0,'2':1,'3':2,'4':3,'5':4,'6':5,'7':6,'8':7,'9':8,'10':9,'J':10,'Q':11,'K':12};
+            cards.sort((a, b) => suitOrder[a.suit] - suitOrder[b.suit] || rankOrder[a.rank] - rankOrder[b.rank]);
+            cards.forEach(c => { c.isFaceUp = true; });
+            statusLabel.style.display = 'none';
+            shuffleBtn.style.display = 'none';
+            resetBtn.style.display = 'none';
+            return;
+        }
+
+        enforceBufferZone();
+        chosenCardObject = null;
+        gameState = 'picking';
+        statusLabel.innerText = "Choose any card and don't let the magician see it.";
+        shuffleBtn.style.display = 'none';
+        resetBtn.style.display = 'none';
+    }
+
+    function encodeByAdapting(chosenCardObj) {
+        const chosenIdx = cards.indexOf(chosenCardObj);
+
+        // Enforce clean buffer before placing anything
+        enforceBufferZone(chosenIdx);
+
+        // Direction: chosen in left half (0-25) → default R-to-L, no trigger.
+        //            chosen in right half (26-51) → L-to-R, trigger at position 51 or 52.
+        const isLtoR = chosenIdx >= 26;
+
+        // --- Place K1 ---
+        // K1 anchors the reading end: positions 48-50 (indices 47-49) for R-to-L,
+        // positions 3-5 (indices 2-4) for L-to-R.
+        const k1Zone = isLtoR ? [2, 3, 4] : [47, 48, 49];
+        const k1TargetIdx = k1Zone[Math.floor(Math.random() * k1Zone.length)];
+
+        // Scan from the K1 end to find the first available key card donor.
+        let k1DonorIdx = -1;
+        if (isLtoR) {
+            for (let i = 0; i <= 51; i++) {
+                if (i !== chosenIdx && keyRanks.includes(cards[i].rank)) { k1DonorIdx = i; break; }
+            }
+        } else {
+            for (let i = 51; i >= 0; i--) {
+                if (i !== chosenIdx && keyRanks.includes(cards[i].rank)) { k1DonorIdx = i; break; }
+            }
+        }
+        swapIdentities(k1TargetIdx, k1DonorIdx);
+        const keySuit = cards[k1TargetIdx].suit;
+        const k1Rank = cards[k1TargetIdx].rank;
+
+        // --- Place trigger (L-to-R only) ---
+        // A key card of a DIFFERENT suit placed at position 51 or 52 (index 50 or 51)
+        // signals L-to-R direction. It is not K1/K2/K3.
+        let triggerIdx = -1;
+        if (isLtoR) {
+            triggerIdx = (chosenIdx === 51) ? 50 : 51;
+            const trigDonorIdx = cards.findIndex((c, i) =>
+                keyRanks.includes(c.rank) &&
+                c.suit !== keySuit &&
+                i !== chosenIdx &&
+                i !== k1TargetIdx
+            );
+            swapIdentities(triggerIdx, trigDonorIdx);
+        }
+
+        // --- Place K3 ---
+        // K3 is 2-4 positions from chosen (toward K1). Its rank encodes the distance.
+        // Rank must differ from K1's rank (only one of each key rank per suit).
+        const k3Options = keyRanks.filter(r => {
+            if (r === k1Rank) return false;
+            const pos = isLtoR ? chosenIdx - parseInt(r) : chosenIdx + parseInt(r);
+            return pos >= 0 && pos < 52 &&
+                   pos !== k1TargetIdx &&
+                   pos !== chosenIdx &&
+                   pos !== triggerIdx;
+        });
+        const k3Rank = k3Options[Math.floor(Math.random() * k3Options.length)];
+        const k3Idx = isLtoR ? chosenIdx - parseInt(k3Rank) : chosenIdx + parseInt(k3Rank);
+
+        const k3DonorIdx = cards.findIndex((c, i) =>
+            c.rank === k3Rank &&
+            c.suit === keySuit &&
+            i !== chosenIdx &&
+            i !== k1TargetIdx &&
+            i !== triggerIdx
+        );
+        swapIdentities(k3Idx, k3DonorIdx);
+
+        // --- Place K2 ---
+        // K2 is the remaining key rank of keySuit, placed randomly between K1 and K3.
+        // Its presence confirms the reading direction and prevents K1/K3 confusion.
+        const k2Rank = keyRanks.find(r => r !== k1Rank && r !== k3Rank);
+        const [rangeMin, rangeMax] = isLtoR
+            ? [k1TargetIdx + 1, k3Idx - 1]
+            : [k3Idx + 1, k1TargetIdx - 1];
+
+        const k2Candidates = [];
+        for (let i = rangeMin; i <= rangeMax; i++) {
+            if (i !== chosenIdx && i !== k1TargetIdx && i !== k3Idx && i !== triggerIdx) {
+                k2Candidates.push(i);
+            }
+        }
+        const k2Idx = k2Candidates[Math.floor(Math.random() * k2Candidates.length)];
+
+        const k2DonorIdx = cards.findIndex((c, i) =>
+            c.rank === k2Rank &&
+            c.suit === keySuit &&
+            i !== chosenIdx &&
+            i !== k1TargetIdx &&
+            i !== k3Idx &&
+            i !== triggerIdx
+        );
+        swapIdentities(k2Idx, k2DonorIdx);
+
+        // --- Cleanup ---
+        // R-to-L: clear indices 50-51 so no false trigger is visible.
+        // L-to-R: clear indices 0-1 (before K1) and whichever of 50/51 isn't the trigger.
+        const specialSet = new Set([chosenIdx, k1TargetIdx, k2Idx, k3Idx]);
+        if (triggerIdx !== -1) specialSet.add(triggerIdx);
+
+        const cleanZone = isLtoR
+            ? [0, 1, ...[50, 51].filter(i => i !== triggerIdx)]
+            : [50, 51];
+
+        for (const ci of cleanZone) {
+            if (specialSet.has(ci) || !keyRanks.includes(cards[ci].rank)) continue;
+            const safeIdx = cards.findIndex((c, i) =>
+                !keyRanks.includes(c.rank) &&
+                !specialSet.has(i) &&
+                !cleanZone.includes(i)
+            );
+            if (safeIdx !== -1) swapIdentities(ci, safeIdx);
+        }
+
+        // Debug
+        dbgChosen.innerText = chosenCardObj.getLabel();
+        dbgSuit.innerText = keySuit;
+        dbgDir.innerText = isLtoR ? 'L→R (trigger)' : 'R→L (default)';
+        dbgPath.innerText = [
+            isLtoR ? `TRIGGER(${cards[triggerIdx].getLabel()})@${triggerIdx+1}` : 'NO TRIGGER',
+            `K1(${cards[k1TargetIdx].getLabel()})@${k1TargetIdx+1}`,
+            `K2(${cards[k2Idx].getLabel()})@${k2Idx+1}`,
+            `K3(${cards[k3Idx].getLabel()})@${k3Idx+1}`,
+            `CHOSEN(${chosenCardObj.getLabel()})@${chosenIdx+1}`
+        ].join(' → ');
+    }
+
+    function handleCardPick(card) {
+        if (gameState !== 'picking') return;
+        chosenCardObject = card;
+        gameState = 'locked';
+        encodeByAdapting(card);
+        card.jogAmount = 1;
+        setTimeout(() => {
+            let count = 0;
+            const interval = setInterval(() => {
+                if (count < cards.length) {
+                    cards[count].isFaceUp = true;
+                    count++;
+                } else {
+                    clearInterval(interval);
+                    statusLabel.innerText = "The magician will now tap your card to reveal it.";
+                    setTimeout(() => {
+                        card.jogAmount = 0;
+                        shuffleBtn.style.display = 'block';
+                        resetBtn.style.display = 'block';
+                    }, 800);
+                }
+            }, 15);
+        }, 600);
+    }
+
+    function performShuffle() {
+        if (gameState !== 'locked') return;
+        isShufflingVisual = true;
+        shuffleBtn.disabled = true;
+        resetBtn.disabled = true;
+        const chosenLabel = chosenCardObject.getLabel();
+        chosenCardObject.jogAmount = 0;
+        cards.forEach(c => { c.shuffleX = Math.random() * canvas.width; c.shuffleY = Math.random() * canvas.height; });
+        setTimeout(() => {
+            // Shuffle all 52 card identities — the chosen card moves with the deck.
+            for (let i = cards.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                swapIdentities(i, j);
+            }
+            chosenCardObject = cards.find(c => c.getLabel() === chosenLabel);
+            encodeByAdapting(chosenCardObject);
+            isShufflingVisual = false;
+            shuffleBtn.disabled = false;
+            resetBtn.disabled = false;
+        }, 800);
+    }
+
+    function playTada() {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function brass(freq, start, duration, vol = 0.3) {
+            const osc1 = audioCtx.createOscillator();
+            const osc2 = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+            osc1.type = 'sawtooth';
+            osc2.type = 'sawtooth';
+            osc1.frequency.value = freq;
+            osc2.frequency.value = freq * 1.008; // slight detune for fullness
+            filter.type = 'lowpass';
+            filter.Q.value = 2;
+            // sweep filter open on attack like a real brass instrument
+            filter.frequency.setValueAtTime(500, audioCtx.currentTime + start);
+            filter.frequency.exponentialRampToValueAtTime(2800, audioCtx.currentTime + start + 0.06);
+            filter.frequency.exponentialRampToValueAtTime(1400, audioCtx.currentTime + start + duration * 0.4);
+            osc1.connect(filter); osc2.connect(filter); filter.connect(gainNode); gainNode.connect(audioCtx.destination);
+            gainNode.gain.setValueAtTime(0, audioCtx.currentTime + start);
+            gainNode.gain.linearRampToValueAtTime(vol, audioCtx.currentTime + start + 0.03);
+            gainNode.gain.setValueAtTime(vol, audioCtx.currentTime + start + duration * 0.55);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + start + duration);
+            osc1.start(audioCtx.currentTime + start); osc2.start(audioCtx.currentTime + start);
+            osc1.stop(audioCtx.currentTime + start + duration + 0.1); osc2.stop(audioCtx.currentTime + start + duration + 0.1);
+        }
+        // C Major short — 1 beat
+        brass(523.25, 0,    0.18, 0.25); // C5
+        brass(659.25, 0,    0.18, 0.25); // E5
+        brass(783.99, 0,    0.18, 0.25); // G5
+        // C Major long — 3 beats
+        brass(523.25, 0.22, 1.5, 0.25); // C5
+        brass(659.25, 0.22, 1.5, 0.25); // E5
+        brass(783.99, 0.22, 1.5, 0.25); // G5
+    }
+
+    function startReveal(card) {
+        shuffleBtn.style.display = 'none';
+        card.revealStartX = card.currentX;
+        card.revealStartY = card.currentY;
+        card.jogAmount = 0;
+        card.originalRotation = card.rotation;
+        card.isRevealing = true;
+        card.revealStartTime = performance.now();
+        setTimeout(() => {
+            statusLabel.innerText = 'Ta-da!';
+            playTada();
+        }, 700);
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        cards.forEach((c, i) => c.update(i, cards.length, mouseX, mouseY));
+        [...cards].sort((a,b) => a.zIndex - b.zIndex).forEach(c => c.draw(ctx));
+        requestAnimationFrame(animate);
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        mouseX = e.clientX - r.left; mouseY = e.clientY - r.top;
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+        const r = canvas.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        const sorted = [...cards].sort((a,b) => b.zIndex - a.zIndex);
+        if (gameState === 'picking') {
+            for (let c of sorted) {
+                if (c.contains(mx, my)) {
+                    handleCardPick(c);
+                    break;
+                }
+            }
+        } else if (gameState === 'locked') {
+            for (let c of sorted) {
+                if (c === chosenCardObject && c.contains(mx, my)) {
+                    startReveal(c);
+                    break;
+                }
+            }
+        }
+    });
+
+    shuffleBtn.addEventListener('click', performShuffle);
+    resetBtn.addEventListener('click', () => { location.reload(); });
+    document.getElementById('debugToggleBtn').addEventListener('click', () => {
+        debugPanel.style.display = debugPanel.style.display === 'none' ? 'grid' : 'none';
+    });
+    window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
+    window.onload = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; init(); animate(); };
+</script>
+</body>
+</html>
